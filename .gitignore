@@ -1,0 +1,8 @@
+*.mp3
+*.flac
+*.wav
+*.ogg
+build
+.vscode
+simple_example
+.clang-format

@@ -1,0 +1,6 @@
+[submodule "pffft"]
+	path = pffft
+	url = https://bitbucket.org/jpommier/pffft.git
+[submodule "miniaudio"]
+	path = miniaudio
+	url = https://github.com/mackron/miniaudio.git
