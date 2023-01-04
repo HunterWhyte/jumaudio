@@ -51,13 +51,13 @@ void dataCallback(ma_device* p_device, void* p_output, const void* p_input, ma_u
   if (setup->mode == AUDIO_MODE_CAPTURE && p_input) {
     input = (float*)p_input;
     if (remaining > frame_count) {
-      ma_copy_memory_64(&setup->buffer.buf[writer_pos], input,
-                        frame_count * setup->info.channels * sizeof(float));
+      memcpy(&setup->buffer.buf[writer_pos], input,
+             frame_count * setup->info.channels * sizeof(float));
     } else {
-      ma_copy_memory_64(&setup->buffer.buf[writer_pos], input,
-                        remaining * setup->info.channels * sizeof(float));
-      ma_copy_memory_64(&setup->buffer.buf[0], &input[remaining * setup->info.channels],
-                        (frame_count - remaining) * setup->info.channels * sizeof(float));
+      memcpy(&setup->buffer.buf[writer_pos], input,
+             remaining * setup->info.channels * sizeof(float));
+      memcpy(&setup->buffer.buf[0], &input[remaining * setup->info.channels],
+             (frame_count - remaining) * setup->info.channels * sizeof(float));
     }
     reader_pos = writer_pos;
 
@@ -147,7 +147,7 @@ jum_AudioSetup* jum_initAudio(ma_uint32 buffer_size, ma_uint32 predecode_bufs, m
   setup->info.sample_rate = 0;
   setup->info.bytes_per_frame = 0;
   setup->info.channels = 0;
-  setup->info.format = 0;
+  setup->info.format = (ma_format)0;
   setup->info.period = period;
 
   result = ma_context_init(NULL, 0, NULL, &setup->context);
@@ -231,6 +231,23 @@ ma_int32 jum_startPlayback(jum_AudioSetup* setup, const char* filepath, ma_int32
   }
 
   setup->mode = AUDIO_MODE_PLAYBACK;
+
+#ifdef JUMAUDIO_DEBUG
+  char* selected_device_name;
+  if (device_index >= 0 && device_index < (ma_int32)setup->playback_device_count) {
+    selected_device_name = setup->playback_device_info[device_index].name;
+  } else {
+    for (ma_uint32 i = 0; i < setup->playback_device_count; i++) {
+      if (setup->playback_device_info[i].isDefault) {
+        selected_device_name = setup->playback_device_info[i].name;
+      }
+    }
+  }
+
+  printf("Starting playback of '%s', on device '%s'\n", filepath, selected_device_name);
+  jum_printAudioInfo(setup->info);
+#endif
+
   return 0;
 }
 
@@ -278,6 +295,23 @@ ma_int32 jum_startCapture(jum_AudioSetup* setup, ma_int32 device_index) {
   }
 
   setup->mode = AUDIO_MODE_CAPTURE;
+
+#ifdef JUMAUDIO_DEBUG
+  char* selected_device_name;
+  if (device_index >= 0 && device_index < (ma_int32)setup->capture_device_count) {
+    selected_device_name = setup->capture_device_info[device_index].name;
+  } else {
+    for (ma_uint32 i = 0; i < setup->capture_device_count; i++) {
+      if (setup->capture_device_info[i].isDefault) {
+        selected_device_name = setup->capture_device_info[i].name;
+      }
+    }
+  }
+
+  printf("Starting capture of device '%s'\n", selected_device_name);
+  jum_printAudioInfo(setup->info);
+#endif
+
   return 0;
 }
 
@@ -522,8 +556,8 @@ void jum_deinitFFT(jum_FFTSetup* setup) {
 void initPFFFT(PFFFTInfo* info, ma_int32 size) {
   info->sz = size;
   info->setup = pffft_new_setup(size, PFFFT_REAL);
-  info->in = pffft_aligned_malloc(size * sizeof(float));
-  info->out = pffft_aligned_malloc(size * 2 * sizeof(float));
+  info->in = (float*)pffft_aligned_malloc(size * sizeof(float));
+  info->out = (float*)pffft_aligned_malloc(size * 2 * sizeof(float));
 }
 
 void deinitPFFFT(PFFFTInfo* info) {
