@@ -3,6 +3,10 @@
 #ifndef JUMAUDIO_H_
 #define JUMAUDIO_H_
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <pthread.h>
 #include <semaphore.h>
 #include <stdbool.h>
@@ -105,5 +109,9 @@ jum_FFTSetup* jum_initFFT(const float freq_points[][2], ma_int32 freqs_sz,
                           const float weight_points[][2], ma_int32 weights_sz, ma_int32 fft_sz,
                           ma_int32 num_bins);
 void jum_deinitFFT(jum_FFTSetup* setup);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif  // JUMAUDIO_H_
