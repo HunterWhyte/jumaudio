@@ -244,7 +244,7 @@ ma_int32 jum_startPlayback(jum_AudioSetup* setup, const char* filepath, ma_int32
     }
   }
 
-  printf("Starting playback of '%s', on device [%d]'%s'\n", device_index, filepath, selected_device_name);
+  printf("Starting playback of '%s', on device [%d]'%s'\n", filepath, device_index, selected_device_name);
   jum_printAudioInfo(setup->info);
 #endif
 
