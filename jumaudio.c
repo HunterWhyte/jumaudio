@@ -244,7 +244,8 @@ ma_int32 jum_startPlayback(jum_AudioSetup* setup, const char* filepath, ma_int32
     }
   }
 
-  printf("Starting playback of '%s', on device [%d]'%s'\n", filepath, device_index, selected_device_name);
+  printf("Starting playback of '%s', on device [%d]'%s'\n", filepath, device_index,
+         selected_device_name);
   jum_printAudioInfo(setup->info);
 #endif
 
@@ -520,9 +521,9 @@ jum_FFTSetup* jum_initFFT(const float freq_points[][2], ma_int32 freqs_sz,
   jum_FFTSetup* setup = (jum_FFTSetup*)malloc(sizeof(jum_FFTSetup));
 
   initPFFFT(&setup->pffft, fft_sz);
-  setup->raw = (float*)malloc(num_bins * sizeof(float));
-  setup->averaged = (float*)malloc(num_bins * sizeof(float));
-  setup->result = (float*)malloc(num_bins * sizeof(float));
+  setup->raw = (float*)calloc(num_bins, sizeof(float));
+  setup->averaged = (float*)calloc(num_bins, sizeof(float));
+  setup->result = (float*)calloc(num_bins, sizeof(float));
 
   setup->luts.freqs = (float*)malloc(num_bins * sizeof(float));
   buildFreqTable(setup->luts.freqs, num_bins, freq_points, freqs_sz);
