@@ -89,11 +89,35 @@ int main(int argc, char* argv[]) {
 
   jum_printAudioInfo(audio->info);
 
+  bool done = false;
+  float amplitude = 1;
   while (1) {
     start = SDL_GetTicks();
     // printf("frame time: %dms\n", msec);
     if (SDL_PollEvent(&event) && (event.type == SDL_KEYDOWN)) {
-      break;
+      switch (event.key.keysym.sym) {
+        case SDLK_LEFT:
+          jum_pausePlayback(audio);
+          break;
+        case SDLK_RIGHT:
+          jum_resumePlayback(audio);
+          break;
+        case SDLK_UP:
+          amplitude += 0.1;
+          printf("amplitude: %f\n", amplitude);
+          jum_setAmplitude(audio, amplitude);
+          break;
+        case SDLK_DOWN:
+          amplitude -= 0.1;
+          printf("amplitude: %f\n", amplitude);
+          jum_setAmplitude(audio, amplitude);
+          break;
+        default:
+          done = true;
+          break;
+      }
+      if(done)
+        break;
     }
 
     jum_analyze(fft, audio, delta);
@@ -104,6 +128,9 @@ int main(int argc, char* argv[]) {
       SDL_RenderDrawLine(renderer, i - 1, WINDOW_HEIGHT - WINDOW_HEIGHT * (fft->result[i - 1]), i,
                          WINDOW_HEIGHT - WINDOW_HEIGHT * (fft->result[i]));
     }
+    SDL_RenderDrawLine(renderer, 0, 0, fft->level * NUM_BINS, 0);
+    SDL_RenderDrawLine(renderer, 0, WINDOW_HEIGHT - 1, jum_getCursor(audio) * NUM_BINS,
+                       WINDOW_HEIGHT - 1);
     SDL_RenderPresent(renderer);
     delta = SDL_GetTicks() - start;
   }

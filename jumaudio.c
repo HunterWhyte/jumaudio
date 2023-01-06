@@ -18,6 +18,7 @@ void readIntoFFTBuffer(const float* samples_in, ma_int32 in_pos, ma_int32 in_siz
                        ma_int32 channels);
 void readIntoBins(float* out, const float* freqs, ma_int32 out_sz, const float* fft,
                   ma_int32 fft_sz, float sample_rate);
+float averageLevel(const float* samples, ma_int32 sz, float prev_level);
 void applyWeighting(float* data, const float* weights, ma_int32 size);
 void applyAveraging(const float* current, float* averaged, ma_int32 size);
 void applySmoothing(const float* in, float* out, ma_int32 size);
@@ -43,6 +44,7 @@ void dataCallback(ma_device* p_device, void* p_output, const void* p_input, ma_u
   float* output;
   ma_uint8* temp;
   ma_uint32 i;
+  bool playing;
 
   setup = (jum_AudioSetup*)p_device->pUserData;
   writer_pos = setup->control.writer_pos;
@@ -63,10 +65,20 @@ void dataCallback(ma_device* p_device, void* p_output, const void* p_input, ma_u
 
   } else if (setup->mode == AUDIO_MODE_PLAYBACK && p_output) {
 
+    // check if playback is paused
+    sem_wait(&setup->control.mutex);
+    playing = setup->control.playing;
+    sem_post(&setup->control.mutex);
+    if (!playing) {
+      return;
+    }
+
     p_decoder = setup->decoder[setup->current_decoder];
     // read samples in original decoder format into a temporary buffer
     if (frame_count * setup->info.bytes_per_frame > setup->conversion_sz) {
+#ifdef JUMAUDIO_DEBUG
       printf("error, requesting more frames than we have room for in temp buffer\n");
+#endif
       return;
     } else {
       ma_decoder_read_pcm_frames(&p_decoder, setup->conversion_buf, frame_count, &frames_read);
@@ -104,10 +116,13 @@ void dataCallback(ma_device* p_device, void* p_output, const void* p_input, ma_u
     output = (float*)p_output;
     // copy from reader pointer to output stream
     for (i = 0; i < frame_count * setup->info.channels; i++) {
-      output[i] = setup->buffer.buf[(reader_pos + i) % setup->buffer.sz];  // TODO * by amplitude
+      output[i] = setup->buffer.buf[(reader_pos + i) % setup->buffer.sz] * setup->control.amplitude;
     }
+    setup->info.current_frame += frame_count;
   } else {
+#ifdef JUMAUDIO_DEBUG
     printf("warning, device started but no configuration\n");
+#endif
     return;
   }
 
@@ -142,6 +157,7 @@ jum_AudioSetup* jum_initAudio(ma_uint32 buffer_size, ma_uint32 predecode_bufs, m
   setup->control.playing = true;
   setup->control.writer_pos = 0;
   setup->control.reader_pos = 0;
+  setup->control.amplitude = 1;
   sem_init(&setup->control.mutex, 0, 1);
 
   setup->info.sample_rate = 0;
@@ -149,6 +165,8 @@ jum_AudioSetup* jum_initAudio(ma_uint32 buffer_size, ma_uint32 predecode_bufs, m
   setup->info.channels = 0;
   setup->info.format = (ma_format)0;
   setup->info.period = period;
+  setup->info.total_frames = 0;
+  setup->info.current_frame = 0;
 
   result = ma_context_init(NULL, 0, NULL, &setup->context);
   if (result != MA_SUCCESS) {
@@ -210,6 +228,8 @@ ma_int32 jum_startPlayback(jum_AudioSetup* setup, const char* filepath, ma_int32
   setup->info.sample_rate = config.sampleRate;
   setup->info.format = setup->decoder[0].outputFormat;
   setup->info.bytes_per_frame = ma_get_bytes_per_frame(setup->info.format, setup->info.channels);
+  ma_data_source_get_length_in_pcm_frames(&setup->decoder[0], &setup->info.total_frames);
+  setup->info.current_frame = 0;
 
   // set buffer size to appropriate value for given number of channels TODO look at how we are dealing with 1 vs 2 channels
   setup->buffer.sz =
@@ -389,6 +409,7 @@ void jum_analyze(jum_FFTSetup* fft, jum_AudioSetup* audio, ma_uint32 msec) {
 
     readIntoFFTBuffer(audio->buffer.buf, temp_pos, audio->buffer.sz, fft->pffft.in, fft->pffft.sz,
                       fft->luts.hamming, audio->info.channels);
+    fft->level = averageLevel(fft->pffft.in, fft->pffft.sz, fft->level);
     pffft_transform_ordered(fft->pffft.setup, fft->pffft.in, fft->pffft.out, NULL, PFFFT_FORWARD);
   } else {
     memset(fft->pffft.out, 0, fft->pffft.sz * sizeof(float));  // TODO only have to clear this once
@@ -416,6 +437,23 @@ void readIntoFFTBuffer(const float* samples_in, ma_int32 in_pos, ma_int32 in_siz
       in_pos++;
     }
   }
+}
+
+float averageLevel(const float* samples, ma_int32 sz, float prev_level) {
+  ma_int32 i;
+  float level = 0;
+  for (i = 0; i < sz; i++) {
+    level += samples[i] * samples[i];
+  }
+  level /= sz;
+  level = sqrtf(level) * 5;
+
+  if (level > prev_level)
+    level = (0.5F) * prev_level + ((1 - 0.5F) * level);
+  else
+    level = (0.9F) * prev_level + ((1 - 0.9F) * level);
+
+  return level;
 }
 
 // take equally distributed fft samples and average into bins
@@ -454,7 +492,7 @@ void readIntoBins(float* out, const float* freqs, ma_int32 out_sz, const float* 
       out[current_bin] = 0;  // set to 0 so that we can +=
     }
 
-    out[current_bin] += sqrt((re * re) + (im * im));
+    out[current_bin] += sqrtf((re * re) + (im * im));
     samples_in_bin++;
   }
 }
@@ -535,6 +573,7 @@ jum_FFTSetup* jum_initFFT(const float freq_points[][2], ma_int32 freqs_sz,
   setup->max = 2.5;
   setup->pos = 0;
   setup->num_bins = num_bins;
+  setup->level = 0;
 
   return setup;
 }
@@ -621,4 +660,30 @@ float lerpArray(const float array[][2], ma_int32 size, float x) {
   }
   // handle case where value is after last point
   return array[size - 1][1];
+}
+
+void jum_setAmplitude(jum_AudioSetup* setup, float amplitude) {
+  if (amplitude < 0) {
+    setup->control.amplitude = 0;
+  } else if (amplitude > 1) {
+    setup->control.amplitude = 1;
+  } else {
+    setup->control.amplitude = amplitude;
+  }
+}
+
+float jum_getCursor(jum_AudioSetup* setup) {
+  return ((float)setup->info.current_frame) / ((float)setup->info.total_frames);
+}
+
+void jum_pausePlayback(jum_AudioSetup* setup) {
+  sem_wait(&setup->control.mutex);
+  setup->control.playing = false;
+  sem_post(&setup->control.mutex);
+}
+
+void jum_resumePlayback(jum_AudioSetup* setup) {
+  sem_wait(&setup->control.mutex);
+  setup->control.playing = true;
+  sem_post(&setup->control.mutex);
 }
