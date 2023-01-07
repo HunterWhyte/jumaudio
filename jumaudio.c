@@ -73,7 +73,7 @@ void dataCallback(ma_device* p_device, void* p_output, const void* p_input, ma_u
       return;
     }
 
-    p_decoder = setup->decoder[setup->current_decoder];
+    p_decoder = setup->decoder;
     // read samples in original decoder format into a temporary buffer
     if (frame_count * setup->info.bytes_per_frame > setup->conversion_sz) {
 #ifdef JUMAUDIO_DEBUG
@@ -185,12 +185,16 @@ jum_AudioSetup* jum_initAudio(ma_uint32 buffer_size, ma_uint32 predecode_bufs, m
 }
 
 void jum_deinitAudio(jum_AudioSetup* setup) {
-  ma_device_uninit(&setup->device);
-  ma_decoder_uninit(&setup->decoder[0]);
-  ma_decoder_uninit(&setup->decoder[1]);
-
-  free(setup->buffer.buf);
-  free(setup->conversion_buf);
+  if (setup != NULL) {
+    if (setup->mode != AUDIO_MODE_NONE) {
+      ma_device_uninit(&setup->device);
+      if (setup->mode == AUDIO_MODE_PLAYBACK) {
+        ma_decoder_uninit(&setup->decoder);
+      }
+    }
+    free(setup->buffer.buf);
+    free(setup->conversion_buf);
+  }
   setup = NULL;
 }
 
@@ -201,12 +205,13 @@ ma_int32 jum_startPlayback(jum_AudioSetup* setup, const char* filepath, ma_int32
   // check if device has already been initialized
   if (setup->mode != AUDIO_MODE_NONE) {
     ma_device_uninit(&setup->device);
-    ma_decoder_uninit(&setup->decoder[0]);
-    ma_decoder_uninit(&setup->decoder[1]);
+    if (setup->mode == AUDIO_MODE_PLAYBACK) {
+      ma_decoder_uninit(&setup->decoder);
+    }
     setup->mode = AUDIO_MODE_NONE;
   }
 
-  result = ma_decoder_init_file(filepath, NULL, &setup->decoder[0]);
+  result = ma_decoder_init_file(filepath, NULL, &setup->decoder);
   if (result != MA_SUCCESS) {
     printf("Could not load file: %s\n", filepath);
     return -1;
@@ -218,17 +223,17 @@ ma_int32 jum_startPlayback(jum_AudioSetup* setup, const char* filepath, ma_int32
   }
   // have to manually convert to float for fft so just use float for playback
   config.playback.format = ma_format_f32;
-  config.playback.channels = setup->decoder[0].outputChannels;
-  config.sampleRate = setup->decoder[0].outputSampleRate;
+  config.playback.channels = setup->decoder.outputChannels;
+  config.sampleRate = setup->decoder.outputSampleRate;
   config.dataCallback = dataCallback;
   config.pUserData = setup;
   config.periodSizeInFrames = setup->info.period;
 
   setup->info.channels = config.playback.channels;
   setup->info.sample_rate = config.sampleRate;
-  setup->info.format = setup->decoder[0].outputFormat;
+  setup->info.format = setup->decoder.outputFormat;
   setup->info.bytes_per_frame = ma_get_bytes_per_frame(setup->info.format, setup->info.channels);
-  ma_data_source_get_length_in_pcm_frames(&setup->decoder[0], &setup->info.total_frames);
+  ma_data_source_get_length_in_pcm_frames(&setup->decoder, &setup->info.total_frames);
   setup->info.current_frame = 0;
 
   // set buffer size to appropriate value for given number of channels TODO look at how we are dealing with 1 vs 2 channels
@@ -238,14 +243,14 @@ ma_int32 jum_startPlayback(jum_AudioSetup* setup, const char* filepath, ma_int32
   result = ma_device_init(&setup->context, &config, &setup->device);
   if (result != MA_SUCCESS) {
     printf("Failed to open device.\n");
-    ma_decoder_uninit(&setup->decoder[0]);
+    ma_decoder_uninit(&setup->decoder);
     return -1;
   }
 
   result = ma_device_start(&setup->device);
   if (result != MA_SUCCESS) {
     ma_device_uninit(&setup->device);
-    ma_decoder_uninit(&setup->decoder[0]);
+    ma_decoder_uninit(&setup->decoder);
     printf("Failed to start device.\n");
     return -1;
   }
@@ -279,8 +284,9 @@ ma_int32 jum_startCapture(jum_AudioSetup* setup, ma_int32 device_index) {
   // check if there is already an active device, if there is then stop it and start a new one
   if (setup->mode != AUDIO_MODE_NONE) {
     ma_device_uninit(&setup->device);
-    ma_decoder_uninit(&setup->decoder[0]);
-    ma_decoder_uninit(&setup->decoder[1]);
+    if (setup->mode == AUDIO_MODE_PLAYBACK) {
+      ma_decoder_uninit(&setup->decoder);
+    }
     setup->mode = AUDIO_MODE_NONE;
   }
 
@@ -579,18 +585,21 @@ jum_FFTSetup* jum_initFFT(const float freq_points[][2], ma_int32 freqs_sz,
 }
 
 void jum_deinitFFT(jum_FFTSetup* setup) {
-  deinitPFFFT(&setup->pffft);
+  if (setup != NULL) {
+    deinitPFFFT(&setup->pffft);
 
-  free(setup->raw);
-  free(setup->averaged);
-  free(setup->result);
+    free(setup->raw);
+    free(setup->averaged);
+    free(setup->result);
 
-  free(setup->luts.weights);
-  free(setup->luts.freqs);
-  free(setup->luts.hamming);
+    free(setup->luts.weights);
+    free(setup->luts.freqs);
+    free(setup->luts.hamming);
 
-  free(setup);
-  setup = NULL;
+    free(setup);
+
+    setup = NULL;
+  }
 }
 
 void initPFFFT(PFFFTInfo* info, ma_int32 size) {

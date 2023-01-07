@@ -65,9 +65,7 @@ typedef struct jum_audio {
   ma_int32 predecode_bufs;
 
   ma_context context;
-
-  ma_int32 current_decoder;
-  ma_decoder decoder[2];
+  ma_decoder decoder;
 
   AudioMode mode;
   ma_device device;
