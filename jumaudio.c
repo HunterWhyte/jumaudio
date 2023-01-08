@@ -239,6 +239,7 @@ ma_int32 jum_startPlayback(jum_AudioSetup* setup, const char* filepath, ma_int32
   // set buffer size to appropriate value for given number of channels TODO look at how we are dealing with 1 vs 2 channels
   setup->buffer.sz =
       setup->info.channels == 2 ? setup->buffer.allocated_sz : setup->buffer.allocated_sz / 2;
+  memset(setup->buffer.buf, 0, setup->buffer.allocated_sz * sizeof(float));
 
   result = ma_device_init(&setup->context, &config, &setup->device);
   if (result != MA_SUCCESS) {
@@ -307,6 +308,7 @@ ma_int32 jum_startCapture(jum_AudioSetup* setup, ma_int32 device_index) {
 
   // set buffer size to appropriate value for 2 channels
   setup->buffer.sz = setup->buffer.allocated_sz;
+  memset(setup->buffer.buf, 0, setup->buffer.allocated_sz * sizeof(float));
 
   result = ma_device_init(&setup->context, &config, &setup->device);
   if (result != MA_SUCCESS) {
