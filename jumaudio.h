@@ -72,7 +72,7 @@ typedef struct jum_audio {
 
   ma_device_info* playback_device_info;
   ma_device_info* capture_device_info;
-  ma_uint32 playback_device_count, capture_device_count, selected_playback, selected_capture;
+  ma_uint32 playback_device_count, capture_device_count;
 } jum_AudioSetup;
 
 // pffft data

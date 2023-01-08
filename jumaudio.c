@@ -32,6 +32,8 @@ void buildFreqTable(float* freq_bins, ma_int32 num_bins, const float in_freqs[][
 void buildHammingWindow(float* hamming_lut, ma_int32 sample_size);
 float lerpArray(const float array[][2], ma_int32 size, float x);
 
+const char* stream_name = "jum";
+
 // miniaudio data callback for both capture and playback
 void dataCallback(ma_device* p_device, void* p_output, const void* p_input, ma_uint32 frame_count) {
   jum_AudioSetup* setup;
@@ -204,6 +206,7 @@ ma_int32 jum_startPlayback(jum_AudioSetup* setup, const char* filepath, ma_int32
 
   // check if device has already been initialized
   if (setup->mode != AUDIO_MODE_NONE) {
+    ma_device_stop(&setup->device);
     ma_device_uninit(&setup->device);
     if (setup->mode == AUDIO_MODE_PLAYBACK) {
       ma_decoder_uninit(&setup->decoder);
@@ -228,7 +231,7 @@ ma_int32 jum_startPlayback(jum_AudioSetup* setup, const char* filepath, ma_int32
   config.dataCallback = dataCallback;
   config.pUserData = setup;
   config.periodSizeInFrames = setup->info.period;
-
+  config.pulse.pStreamNamePlayback = stream_name;
   setup->info.channels = config.playback.channels;
   setup->info.sample_rate = config.sampleRate;
   setup->info.format = setup->decoder.outputFormat;
