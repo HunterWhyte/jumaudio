@@ -12,7 +12,12 @@
 #define MINIAUDIO_IMPLEMENTATION
 #include "miniaudio/miniaudio.h"
 
-void dataCallback(ma_device* p_device, void* p_output, const void* p_input, ma_uint32 frame_count);
+void captureCallback(ma_device* p_device, void* p_output, const void* p_input,
+                     ma_uint32 frame_count);
+void playbackCallback(ma_device* p_device, void* p_output, const void* p_input,
+                      ma_uint32 frame_count);
+void closePlaybackDevice(jum_AudioSetup* setup);
+void closeCaptureDevice(jum_AudioSetup* setup);
 void readIntoFFTBuffer(const float* samples_in, ma_int32 in_pos, ma_int32 in_size,
                        float* samples_out, ma_int32 out_size, const float* hamming,
                        ma_int32 channels);
@@ -34,98 +39,107 @@ float lerpArray(const float array[][2], ma_int32 size, float x);
 
 const char* stream_name = "jum";
 
-// miniaudio data callback for both capture and playback
-void dataCallback(ma_device* p_device, void* p_output, const void* p_input, ma_uint32 frame_count) {
+void captureCallback(ma_device* p_device, void* p_output, const void* p_input,
+                     ma_uint32 frame_count) {
   jum_AudioSetup* setup;
-  ma_uint64 frames_read;
   ma_int32 reader_pos;
   ma_int32 writer_pos;
-  ma_decoder p_decoder;
   ma_uint32 remaining;
   float* input;
-  float* output;
-  ma_uint8* temp;
-  ma_uint32 i;
-  bool playing;
+  (void)p_output;
 
   setup = (jum_AudioSetup*)p_device->pUserData;
   writer_pos = setup->control.writer_pos;
   remaining = (setup->buffer.sz - writer_pos) / setup->info.channels;
 
-  if (setup->mode == AUDIO_MODE_CAPTURE && p_input) {
-    input = (float*)p_input;
-    if (remaining > frame_count) {
-      memcpy(&setup->buffer.buf[writer_pos], input,
-             frame_count * setup->info.channels * sizeof(float));
-    } else {
-      memcpy(&setup->buffer.buf[writer_pos], input,
-             remaining * setup->info.channels * sizeof(float));
-      memcpy(&setup->buffer.buf[0], &input[remaining * setup->info.channels],
-             (frame_count - remaining) * setup->info.channels * sizeof(float));
-    }
-    reader_pos = writer_pos;
+  if (setup->mode != AUDIO_MODE_CAPTURE || !p_input) {
+    return;
+  }
 
-  } else if (setup->mode == AUDIO_MODE_PLAYBACK && p_output) {
-
-    // check if playback is paused
-    sem_wait(&setup->control.mutex);
-    playing = setup->control.playing;
-    sem_post(&setup->control.mutex);
-    if (!playing) {
-      return;
-    }
-
-    p_decoder = setup->decoder;
-    // read samples in original decoder format into a temporary buffer
-    if (frame_count * setup->info.bytes_per_frame > setup->conversion_sz) {
-#ifdef JUMAUDIO_DEBUG
-      printf("error, requesting more frames than we have room for in temp buffer\n");
-#endif
-      return;
-    } else {
-      ma_decoder_read_pcm_frames(&p_decoder, setup->conversion_buf, frame_count, &frames_read);
-    }
-
-    // pause playback if reach end of file TODO add looping, next song etc
-    if (frames_read == 0) {
-      sem_wait(&setup->control.mutex);
-      setup->control.playing = false;
-      sem_post(&setup->control.mutex);
-      return;
-    }
-
-    // cast conversion buf to uint8* so that we can index it by byte
-    temp = (ma_uint8*)setup->conversion_buf;
-    // convert from decoder output format to 32 bit float and copy to the audio buffer
-    if (remaining > frame_count) {
-      ma_convert_pcm_frames_format(&setup->buffer.buf[writer_pos], ma_format_f32, temp,
-                                   setup->info.format, frame_count, setup->info.channels,
-                                   ma_dither_mode_none);
-    } else {
-      ma_convert_pcm_frames_format(&setup->buffer.buf[writer_pos], ma_format_f32, temp,
-                                   setup->info.format, remaining, setup->info.channels,
-                                   ma_dither_mode_none);
-      ma_convert_pcm_frames_format(
-          &setup->buffer.buf[0], ma_format_f32, &temp[remaining * setup->info.bytes_per_frame],
-          setup->info.format, (frame_count - remaining), setup->info.channels, ma_dither_mode_none);
-    }
-
-    // determine where the reader pointer should be based on the writer
-    reader_pos = writer_pos - (setup->predecode_bufs * setup->info.period * setup->info.channels);
-    if (reader_pos < 0)
-      reader_pos = setup->buffer.sz + reader_pos;
-
-    output = (float*)p_output;
-    // copy from reader pointer to output stream
-    for (i = 0; i < frame_count * setup->info.channels; i++) {
-      output[i] = setup->buffer.buf[(reader_pos + i) % setup->buffer.sz] * setup->control.amplitude;
-    }
-    setup->info.current_frame += frame_count;
+  input = (float*)p_input;
+  if (remaining > frame_count) {
+    memcpy(&setup->buffer.buf[writer_pos], input,
+           frame_count * setup->info.channels * sizeof(float));
   } else {
+    memcpy(&setup->buffer.buf[writer_pos], input, remaining * setup->info.channels * sizeof(float));
+    memcpy(&setup->buffer.buf[0], &input[remaining * setup->info.channels],
+           (frame_count - remaining) * setup->info.channels * sizeof(float));
+  }
+  reader_pos = writer_pos;
+
+  // printf("writer: %d reader: %d frames %d\n", audio_control.writer_pos, reader_pos, frame_count);
+  // increment writer pointer
+  writer_pos += frame_count * setup->info.channels;
+  if (writer_pos >= setup->buffer.sz) {
+    writer_pos -= setup->buffer.sz;
+  }
+
+  sem_wait(&setup->control.mutex);
+  setup->control.writer_pos = writer_pos;
+  setup->control.reader_pos = reader_pos;
+  setup->control.new_data_flag = true;
+  sem_post(&setup->control.mutex);
+}
+
+void playbackCallback(ma_device* p_device, void* p_output, const void* p_input,
+                      ma_uint32 frame_count) {
+  jum_AudioSetup* setup;
+  ma_uint64 frames_read;
+  ma_int32 reader_pos;
+  ma_int32 writer_pos;
+  ma_uint32 remaining;
+  float* output;
+  ma_uint32 i;
+  (void)p_input;
+
+  setup = (jum_AudioSetup*)p_device->pUserData;
+  writer_pos = setup->control.writer_pos;
+  remaining = (setup->buffer.sz - writer_pos) / setup->info.channels;
+
+  if (!p_output || !setup->playback_open) {
+    return;
+  }
+
+  output = (float*)p_output;
+
+  // read samples from non fft audio source
+  if (frame_count * setup->info.bytes_per_frame > setup->conversion_sz) {
 #ifdef JUMAUDIO_DEBUG
-    printf("warning, device started but no configuration\n");
+    printf("error, requesting more frames than we have room for in temp buffer\n");
 #endif
     return;
+  } else {
+    ma_engine_read_pcm_frames(&setup->other_engine, setup->conversion_buf, frame_count,
+                              &frames_read);
+    for (i = 0; i < frame_count * setup->info.channels; i++) {
+      output[i] = setup->conversion_buf[i] * setup->control.other_volume;
+    }
+  }
+
+  if (setup->mode != AUDIO_MODE_PLAYBACK) {
+    return;
+  }
+
+  // convert from decoder output format to 32 bit float and copy to the audio buffer
+  if (remaining > frame_count) {
+    ma_engine_read_pcm_frames(&setup->music_engine, &setup->buffer.buf[writer_pos], frame_count,
+                              &frames_read);
+  } else {
+    ma_engine_read_pcm_frames(&setup->music_engine, &setup->buffer.buf[writer_pos], remaining,
+                              &frames_read);
+    ma_engine_read_pcm_frames(&setup->music_engine, &setup->buffer.buf[0], frame_count - remaining,
+                              &frames_read);
+  }
+
+  // determine where the reader pointer should be based on the writer
+  reader_pos = writer_pos - (setup->predecode_bufs * setup->info.period * setup->info.channels);
+  if (reader_pos < 0)
+    reader_pos = setup->buffer.sz + reader_pos;
+
+  // copy from reader pointer to output stream
+  for (i = 0; i < frame_count * setup->info.channels; i++) {
+    output[i] +=
+        setup->buffer.buf[(reader_pos + i) % setup->buffer.sz] * setup->control.music_volume;
   }
 
   // printf("writer: %d reader: %d frames %d\n", audio_control.writer_pos, reader_pos, frame_count);
@@ -145,6 +159,7 @@ void dataCallback(ma_device* p_device, void* p_output, const void* p_input, ma_u
 // create jum_AudioSetup, initialize miniaudio context, enumerate devices
 jum_AudioSetup* jum_initAudio(ma_uint32 buffer_size, ma_uint32 predecode_bufs, ma_uint32 period) {
   ma_result result;
+  ma_resource_manager_config resource_manager_config;
   jum_AudioSetup* setup = (jum_AudioSetup*)malloc(sizeof(jum_AudioSetup));
   // allocate enough for max of 2 channels, if we are decoding 1 channel only half will be used
   setup->buffer.buf = (float*)malloc(buffer_size * 2 * sizeof(float));
@@ -156,10 +171,10 @@ jum_AudioSetup* jum_initAudio(ma_uint32 buffer_size, ma_uint32 predecode_bufs, m
 
   setup->mode = AUDIO_MODE_NONE;
   setup->control.new_data_flag = false;
-  setup->control.playing = true;
   setup->control.writer_pos = 0;
   setup->control.reader_pos = 0;
-  setup->control.amplitude = 1;
+  setup->control.music_volume = 1;
+  setup->control.other_volume = 1;
   sem_init(&setup->control.mutex, 0, 1);
 
   setup->info.sample_rate = 0;
@@ -167,8 +182,14 @@ jum_AudioSetup* jum_initAudio(ma_uint32 buffer_size, ma_uint32 predecode_bufs, m
   setup->info.channels = 0;
   setup->info.format = (ma_format)0;
   setup->info.period = period;
-  setup->info.total_frames = 0;
-  setup->info.current_frame = 0;
+  setup->capture_open = false;
+  setup->playback_open = false;
+
+  setup->num_sound_files = 0;
+  setup->song_file.filepath = NULL;
+  for (ma_int32 i = 0; i < MAX_SOUND_FILES; i++) {
+    setup->sound_files[i].filepath = NULL;
+  }
 
   result = ma_context_init(NULL, 0, NULL, &setup->context);
   if (result != MA_SUCCESS) {
@@ -183,83 +204,173 @@ jum_AudioSetup* jum_initAudio(ma_uint32 buffer_size, ma_uint32 predecode_bufs, m
     return NULL;
   }
 
+  resource_manager_config = ma_resource_manager_config_init();
+  resource_manager_config.decodedFormat = ma_format_f32;
+  resource_manager_config.decodedChannels = 2;
+  resource_manager_config.decodedSampleRate = 48000;
+  result = ma_resource_manager_init(&resource_manager_config, &setup->resource_manager);
+  if (result != MA_SUCCESS) {
+    printf("Failed to initialize resource manager.");
+    return NULL;
+  }
+
   return setup;
+}
+
+void clearSongFile(jum_AudioSetup* setup) {
+  if (setup->song_file.filepath != NULL) {
+    ma_sound_uninit(&setup->song_file.sound);
+    free(setup->song_file.filepath);
+    setup->song_file.filepath = NULL;
+  }
+}
+
+void jum_clearSoundFiles(jum_AudioSetup* setup) {
+  for (ma_int32 i = 0; i < setup->num_sound_files; i++) {
+    if (setup->sound_files[i].filepath != NULL) {
+      ma_sound_uninit(&setup->sound_files[i].sound);
+      free(setup->sound_files[i].filepath);
+      setup->sound_files[i].filepath = NULL;
+    }
+  }
+  setup->num_sound_files = 0;
 }
 
 void jum_deinitAudio(jum_AudioSetup* setup) {
   if (setup != NULL) {
-    if (setup->mode != AUDIO_MODE_NONE) {
-      ma_device_uninit(&setup->device);
-      if (setup->mode == AUDIO_MODE_PLAYBACK) {
-        ma_decoder_uninit(&setup->decoder);
-      }
+    if (setup->capture_open) {
+      ma_device_stop(&setup->capture_device);
+      ma_device_uninit(&setup->capture_device);
     }
+    if (setup->playback_open) {
+      clearSongFile(setup);
+      jum_clearSoundFiles(setup);
+      ma_engine_stop(&setup->music_engine);
+      ma_engine_uninit(&setup->music_engine);
+      ma_engine_stop(&setup->other_engine);
+      ma_engine_uninit(&setup->other_engine);
+      ma_device_stop(&setup->playback_device);
+      ma_device_uninit(&setup->playback_device);
+    }
+    ma_context_uninit(&setup->context);
+    ma_resource_manager_uninit(&setup->resource_manager);
     free(setup->buffer.buf);
     free(setup->conversion_buf);
   }
   setup = NULL;
 }
 
-ma_int32 jum_startPlayback(jum_AudioSetup* setup, const char* filepath, ma_int32 device_index) {
-  ma_result result;
-  ma_device_config config;
-
-  // check if device has already been initialized
-  if (setup->mode != AUDIO_MODE_NONE) {
-    ma_device_stop(&setup->device);
-    ma_device_uninit(&setup->device);
-    if (setup->mode == AUDIO_MODE_PLAYBACK) {
-      ma_decoder_uninit(&setup->decoder);
+void closePlaybackDevice(jum_AudioSetup* setup) {
+  if (setup->playback_open) {
+    if (setup->song_file.filepath != NULL) {
+      ma_sound_stop(&setup->song_file.sound);
+      ma_sound_uninit(&setup->song_file.sound);
     }
-    setup->mode = AUDIO_MODE_NONE;
+    for (ma_int32 i = 0; i < setup->num_sound_files; i++) {
+      if (setup->sound_files[i].filepath != NULL) {
+        ma_sound_stop(&setup->sound_files[i].sound);
+        ma_sound_uninit(&setup->sound_files[i].sound);
+      }
+    }
+    ma_engine_stop(&setup->music_engine);
+    ma_engine_uninit(&setup->music_engine);
+    ma_engine_stop(&setup->other_engine);
+    ma_engine_uninit(&setup->other_engine);
+    ma_device_stop(&setup->playback_device);
+    ma_device_uninit(&setup->playback_device);
+    setup->playback_open = false;
   }
+}
 
-  result = ma_decoder_init_file(filepath, NULL, &setup->decoder);
-  if (result != MA_SUCCESS) {
-    printf("Could not load file: %s\n", filepath);
-    return -1;
-  }
-  config = ma_device_config_init(ma_device_type_playback);
+ma_int32 jum_openPlaybackDevice(jum_AudioSetup* setup, ma_int32 device_index) {
+  ma_result result;
+  ma_device_config device_config;
+  ma_engine_config engine_config;
+
+  // check if there is already an active device
+  closePlaybackDevice(setup);
+
+  device_config = ma_device_config_init(ma_device_type_playback);
   // if device index is valid then set it
   if (device_index >= 0 && device_index < (ma_int32)setup->playback_device_count) {
-    config.playback.pDeviceID = &setup->playback_device_info[device_index].id;
+    device_config.playback.pDeviceID = &setup->playback_device_info[device_index].id;
   }
+
   // have to manually convert to float for fft so just use float for playback
-  config.playback.format = ma_format_f32;
-  config.playback.channels = setup->decoder.outputChannels;
-  config.sampleRate = setup->decoder.outputSampleRate;
-  config.dataCallback = dataCallback;
-  config.pUserData = setup;
-  config.periodSizeInFrames = setup->info.period;
-  config.pulse.pStreamNamePlayback = stream_name;
-  setup->info.channels = config.playback.channels;
-  setup->info.sample_rate = config.sampleRate;
-  setup->info.format = setup->decoder.outputFormat;
+  device_config.playback.format = ma_format_f32;
+  device_config.playback.channels = 2;
+  device_config.sampleRate = setup->resource_manager.config.decodedSampleRate;
+  device_config.dataCallback = playbackCallback;
+  device_config.pUserData = setup;
+  device_config.periodSizeInFrames = setup->info.period;
+  device_config.pulse.pStreamNamePlayback = stream_name;
+
+  setup->info.channels = device_config.playback.channels;
+  setup->info.sample_rate = device_config.sampleRate;
+  setup->info.format = ma_format_f32;
   setup->info.bytes_per_frame = ma_get_bytes_per_frame(setup->info.format, setup->info.channels);
-  ma_data_source_get_length_in_pcm_frames(&setup->decoder, &setup->info.total_frames);
-  setup->info.current_frame = 0;
 
   // set buffer size to appropriate value for given number of channels TODO look at how we are dealing with 1 vs 2 channels
   setup->buffer.sz =
       setup->info.channels == 2 ? setup->buffer.allocated_sz : setup->buffer.allocated_sz / 2;
   memset(setup->buffer.buf, 0, setup->buffer.allocated_sz * sizeof(float));
 
-  result = ma_device_init(&setup->context, &config, &setup->device);
+  result = ma_device_init(&setup->context, &device_config, &setup->playback_device);
   if (result != MA_SUCCESS) {
     printf("Failed to open device.\n");
-    ma_decoder_uninit(&setup->decoder);
     return -1;
   }
 
-  result = ma_device_start(&setup->device);
+  engine_config = ma_engine_config_init();
+  engine_config.pDevice = &setup->playback_device;
+  engine_config.pResourceManager = &setup->resource_manager;
+  result = ma_engine_init(&engine_config, &setup->music_engine);
   if (result != MA_SUCCESS) {
-    ma_device_uninit(&setup->device);
-    ma_decoder_uninit(&setup->decoder);
-    printf("Failed to start device.\n");
+    printf("Failed to initialize music engine\n");
+    ma_device_uninit(&setup->playback_device);
+    return -1;
+  }
+  result = ma_engine_init(&engine_config, &setup->other_engine);
+  if (result != MA_SUCCESS) {
+    printf("Failed to initialize other engine\n");
+    ma_engine_uninit(&setup->music_engine);
+    ma_device_uninit(&setup->playback_device);
     return -1;
   }
 
-  setup->mode = AUDIO_MODE_PLAYBACK;
+  result = ma_engine_start(&setup->music_engine);
+  if (result != MA_SUCCESS) {
+    printf("Failed to start music engine \n");
+    return -1;
+  }
+
+  result = ma_engine_start(&setup->other_engine);
+  if (result != MA_SUCCESS) {
+    printf("Failed to start other engine \n");
+    return -1;
+  }
+
+  setup->playback_open = true;
+
+  // load songs back after changing device
+  if (setup->song_file.filepath != NULL) {
+    result = ma_sound_init_from_file(&setup->music_engine, setup->song_file.filepath, SOUND_FLAGS,
+                                     NULL, NULL, &setup->song_file.sound);
+    if (result != MA_SUCCESS) {
+      printf("WARNING: Failed to load sound \"%s\"", setup->song_file.filepath);
+      setup->song_file.filepath = NULL;
+    }
+  }
+  for (ma_int32 i = 0; i < setup->num_sound_files; i++) {
+    if (setup->sound_files[i].filepath != NULL) {
+      result = ma_sound_init_from_file(&setup->other_engine, setup->sound_files[i].filepath,
+                                       SOUND_FLAGS, NULL, NULL, &setup->sound_files[i].sound);
+      if (result != MA_SUCCESS) {
+        printf("WARNING: Failed to load sound \"%s\"", setup->sound_files[i].filepath);
+        setup->sound_files[i].filepath = NULL;
+      }
+    }
+  }
 
 #ifdef JUMAUDIO_DEBUG
   char* selected_device_name;
@@ -273,60 +384,188 @@ ma_int32 jum_startPlayback(jum_AudioSetup* setup, const char* filepath, ma_int32
     }
   }
 
-  printf("Starting playback of '%s', on device [%d]'%s'\n", filepath, device_index,
-         selected_device_name);
+  printf("Starting playback on device [%d]'%s'\n", device_index, selected_device_name);
   jum_printAudioInfo(setup->info);
 #endif
 
   return 0;
 }
 
-ma_int32 jum_startCapture(jum_AudioSetup* setup, ma_int32 device_index) {
+ma_int32 jum_loadSound(jum_AudioSetup* setup, const char* filepath) {
   ma_result result;
-  ma_device_config config;
+  SoundFile* sound_file;
+  ma_int32 index;
+
+  index = setup->num_sound_files;
+  if (index >= MAX_SOUND_FILES) {
+    printf("WARNING: Failed to load sound \"%s\", exceeded max number of sounds", filepath);
+    return -2;
+  }
+
+  // first avaialable slot
+  sound_file = &setup->sound_files[index];
+  sound_file->filepath = NULL;
+  if (setup->playback_open) {
+    result = ma_sound_init_from_file(&setup->other_engine, filepath, SOUND_FLAGS, NULL, NULL,
+                                     &sound_file->sound);
+    if (result != MA_SUCCESS) {
+      printf("WARNING: Failed to load sound \"%s\"", filepath);
+      return -1;
+    }
+  }
+
+  sound_file->filepath = strdup(filepath);
+
+  setup->num_sound_files++;
+  return index;
+}
+
+ma_int32 jum_playSound(jum_AudioSetup* setup, ma_int32 handle, float repeat_delay) {
+  float cursor;
+  SoundFile* sound_file;
+
+  if (!setup->playback_open) {
+    printf("WARNING: attempting to play sound before opening playback device\n");
+    return -2;
+  }
+  if (handle < 0 || handle >= setup->num_sound_files) {
+    printf("WARNING: attempting to play sound from invalid sound handle\n");
+    return -1;
+  }
+  sound_file = &setup->sound_files[handle];
+  if (sound_file->filepath == NULL) {
+    printf("WARNING: file for sound handle used is not loaded\n");
+    return -1;
+  }
+
+  if (ma_sound_is_playing(&sound_file->sound)) {
+    ma_sound_get_cursor_in_seconds(&sound_file->sound, &cursor);
+    if (cursor > repeat_delay) {  // prevent from replaying too fast
+      ma_sound_seek_to_pcm_frame(&sound_file->sound, 0);
+    }
+  } else {
+    ma_sound_start(&sound_file->sound);
+  }
+
+  return 0;
+}
+
+ma_int32 jum_playSong(jum_AudioSetup* setup, const char* filepath) {
+  ma_result result;
+
+  if (!setup->playback_open) {
+    printf("WARNING: attempting to play song before opening playback device\n");
+    return -2;
+  }
+
+  if (setup->song_file.filepath != NULL) {
+    ma_sound_stop(&setup->song_file.sound);
+    ma_sound_uninit(&setup->song_file.sound);
+    free(setup->song_file.filepath);
+    setup->song_file.filepath = NULL;
+  }
+
+  result = ma_sound_init_from_file(&setup->music_engine, filepath, SOUND_FLAGS, NULL, NULL,
+                                   &setup->song_file.sound);
+  if (result != MA_SUCCESS) {
+    printf("WARNING: Failed to load sound \"%s\"", setup->song_file.filepath);
+    return -1;
+  }
+
+  setup->song_file.filepath = strdup(filepath);
+
+  memset(setup->buffer.buf, 0, setup->buffer.allocated_sz * sizeof(float));
+  // start song
+  result = ma_sound_start(&setup->song_file.sound);
+  if (result != MA_SUCCESS) {
+    printf("WARNING: Failed to start sound \"%s\"", setup->song_file.filepath);
+    return -3;
+  }
+
+  return 0;
+}
+
+float jum_getSongLength(jum_AudioSetup* setup) {
+  ma_result result;
+  float length;
+  if (setup->song_file.filepath == NULL) {
+    return 0;
+  }
+  result = ma_sound_get_length_in_seconds(&setup->song_file.sound, &length);
+  if (result != MA_SUCCESS) {
+    return 0;
+  }
+  return length;
+}
+
+float jum_getSongCursor(jum_AudioSetup* setup) {
+  ma_result result;
+  float cursor;
+  if (setup->song_file.filepath == NULL) {
+    return 0;
+  }
+  result = ma_sound_get_cursor_in_seconds(&setup->song_file.sound, &cursor);
+  if (result != MA_SUCCESS) {
+    return 0;
+  }
+  return cursor;
+}
+
+bool jum_isSongFinished(jum_AudioSetup* setup) {
+  if (setup->song_file.filepath == NULL) {
+    return false;
+  }
+  return ma_sound_at_end(&setup->song_file.sound);
+}
+
+void closeCaptureDevice(jum_AudioSetup* setup) {
+  if (setup->capture_open) {
+    ma_device_stop(&setup->capture_device);
+    ma_device_uninit(&setup->capture_device);
+    setup->capture_open = false;
+  }
+}
+
+ma_int32 jum_openCaptureDevice(jum_AudioSetup* setup, ma_int32 device_index) {
+  ma_result result;
+  ma_device_config device_config;
 
   // check if there is already an active device, if there is then stop it and start a new one
-  if (setup->mode != AUDIO_MODE_NONE) {
-    ma_device_uninit(&setup->device);
-    if (setup->mode == AUDIO_MODE_PLAYBACK) {
-      ma_decoder_uninit(&setup->decoder);
-    }
-    setup->mode = AUDIO_MODE_NONE;
-  }
+  closeCaptureDevice(setup);
 
-  config = ma_device_config_init(ma_device_type_capture);
+  device_config = ma_device_config_init(ma_device_type_capture);
   if (device_index >= 0 && device_index < (ma_int32)setup->capture_device_count) {
-    config.capture.pDeviceID = &setup->capture_device_info[device_index].id;
+    device_config.capture.pDeviceID = &setup->capture_device_info[device_index].id;
   }
-  config.capture.format = ma_format_f32;
-  config.capture.channels = 2;
-  config.sampleRate = 44100;
-  config.dataCallback = dataCallback;
-  config.pUserData = setup;
+  device_config.capture.format = ma_format_f32;
+  device_config.capture.channels = 2;
+  device_config.sampleRate = 44100;
+  device_config.dataCallback = captureCallback;
+  device_config.pUserData = setup;
 
-  setup->info.channels = config.capture.channels;
-  setup->info.sample_rate = config.sampleRate;
-  setup->info.format = config.capture.format;
+  setup->info.channels = device_config.capture.channels;
+  setup->info.sample_rate = device_config.sampleRate;
+  setup->info.format = device_config.capture.format;
   setup->info.bytes_per_frame = ma_get_bytes_per_frame(setup->info.format, setup->info.channels);
 
   // set buffer size to appropriate value for 2 channels
   setup->buffer.sz = setup->buffer.allocated_sz;
   memset(setup->buffer.buf, 0, setup->buffer.allocated_sz * sizeof(float));
 
-  result = ma_device_init(&setup->context, &config, &setup->device);
+  result = ma_device_init(&setup->context, &device_config, &setup->capture_device);
   if (result != MA_SUCCESS) {
     printf("Failed to open device.\n");
     return -1;
   }
 
-  result = ma_device_start(&setup->device);
+  result = ma_device_start(&setup->capture_device);
   if (result != MA_SUCCESS) {
-    ma_device_uninit(&setup->device);
+    ma_device_uninit(&setup->capture_device);
     printf("Failed to start device.\n");
     return -1;
   }
 
-  setup->mode = AUDIO_MODE_CAPTURE;
+  setup->capture_open = true;
 
 #ifdef JUMAUDIO_DEBUG
   char* selected_device_name;
@@ -377,7 +616,6 @@ void jum_printAudioInfo(AudioInfo info) {
 void jum_analyze(jum_FFTSetup* fft, jum_AudioSetup* audio, ma_uint32 msec) {
   ma_int32 reader_pos;
   ma_int32 temp_pos;
-  bool playing;
 
   // increment pointer position (in 32 bit float samples) based on given time
   fft->pos += ((audio->info.sample_rate * msec) / 1000L) * audio->info.channels;
@@ -394,7 +632,6 @@ void jum_analyze(jum_FFTSetup* fft, jum_AudioSetup* audio, ma_uint32 msec) {
   } else {
     reader_pos = -1;  // no new reader pos
   }
-  playing = audio->control.playing;
   sem_post(&audio->control.mutex);
 
   // if there was a new reader position
@@ -405,26 +642,22 @@ void jum_analyze(jum_FFTSetup* fft, jum_AudioSetup* audio, ma_uint32 msec) {
     }
   }
 
-  if (playing) {
-    // temp position since fft_pos keeps up with actual playback rate
-    // if we are capturing, then delay one buffer size behind reader
-    if (audio->mode == AUDIO_MODE_CAPTURE) {
-      temp_pos = fft->pos - fft->pffft.sz * audio->info.channels;
-    } else {
-      temp_pos = fft->pos;
-    }
-
-    if (temp_pos < 0) {
-      temp_pos = audio->buffer.sz + temp_pos;
-    }
-
-    readIntoFFTBuffer(audio->buffer.buf, temp_pos, audio->buffer.sz, fft->pffft.in, fft->pffft.sz,
-                      fft->luts.hamming, audio->info.channels);
-    fft->level = averageLevel(fft->pffft.in, fft->pffft.sz, fft->level);
-    pffft_transform_ordered(fft->pffft.setup, fft->pffft.in, fft->pffft.out, NULL, PFFFT_FORWARD);
+  // temp position since fft_pos keeps up with actual playback rate
+  // if we are capturing, then delay one buffer size behind reader
+  if (audio->mode == AUDIO_MODE_CAPTURE) {
+    temp_pos = fft->pos - fft->pffft.sz * audio->info.channels;
   } else {
-    memset(fft->pffft.out, 0, fft->pffft.sz * sizeof(float));  // TODO only have to clear this once
+    temp_pos = fft->pos;
   }
+
+  if (temp_pos < 0) {
+    temp_pos = audio->buffer.sz + temp_pos;
+  }
+
+  readIntoFFTBuffer(audio->buffer.buf, temp_pos, audio->buffer.sz, fft->pffft.in, fft->pffft.sz,
+                    fft->luts.hamming, audio->info.channels);
+  fft->level = averageLevel(fft->pffft.in, fft->pffft.sz, fft->level);
+  pffft_transform_ordered(fft->pffft.setup, fft->pffft.in, fft->pffft.out, NULL, PFFFT_FORWARD);
 
   readIntoBins(fft->raw, fft->luts.freqs, fft->num_bins, fft->pffft.out, fft->pffft.sz,
                audio->info.sample_rate);
@@ -676,28 +909,51 @@ float lerpArray(const float array[][2], ma_int32 size, float x) {
   return array[size - 1][1];
 }
 
-void jum_setAmplitude(jum_AudioSetup* setup, float amplitude) {
-  if (amplitude < 0) {
-    setup->control.amplitude = 0;
-  } else if (amplitude > 1) {
-    setup->control.amplitude = 1;
+void jum_setMusicVolume(jum_AudioSetup* setup, float volume) {
+  if (volume < 0) {
+    setup->control.music_volume = 0;
   } else {
-    setup->control.amplitude = amplitude;
+    setup->control.music_volume = volume;
   }
 }
 
-float jum_getCursor(jum_AudioSetup* setup) {
-  return ((float)setup->info.current_frame) / ((float)setup->info.total_frames);
+void jum_setOtherVolume(jum_AudioSetup* setup, float volume) {
+  if (volume < 0) {
+    setup->control.other_volume = 0;
+  } else {
+    setup->control.other_volume = volume;
+  }
 }
 
-void jum_pausePlayback(jum_AudioSetup* setup) {
-  sem_wait(&setup->control.mutex);
-  setup->control.playing = false;
-  sem_post(&setup->control.mutex);
+void jum_pauseSong(jum_AudioSetup* setup) {
+  if (!setup->playback_open) {
+    printf("WARNING: attempting to pause song without playback device open\n");
+    return;
+  }
+  if (setup->song_file.filepath == NULL) {
+    return;
+  }
+
+  if (ma_sound_is_playing(&setup->song_file.sound)) {
+    ma_sound_stop(&setup->song_file.sound);
+  }
 }
 
-void jum_resumePlayback(jum_AudioSetup* setup) {
-  sem_wait(&setup->control.mutex);
-  setup->control.playing = true;
-  sem_post(&setup->control.mutex);
+void jum_resumeSong(jum_AudioSetup* setup) {
+  if (!setup->playback_open) {
+    printf("WARNING: attempting to resume song without playback device open\n");
+    return;
+  }
+  if (setup->song_file.filepath == NULL) {
+    return;
+  }
+
+  if (ma_sound_at_end(&setup->song_file.sound)) {
+    ma_sound_seek_to_pcm_frame(&setup->song_file.sound, 0);
+  }
+  ma_sound_start(&setup->song_file.sound);
+}
+
+void jum_setFFTMode(jum_AudioSetup* setup, jum_AudioMode mode) {
+  setup->mode = mode;
 }

@@ -62,11 +62,12 @@ int main(int argc, char* argv[]) {
   fft = jum_initFFT(freqs, NUM_FREQS, weights, NUM_WEIGHTS, FFT_BUF_SIZE, NUM_BINS);
   audio = jum_initAudio(FFT_BUF_SIZE * (PREDECODE_BUFS + 5), PREDECODE_BUFS, FFT_BUF_SIZE);
 
+  if (jum_openPlaybackDevice(audio, -1) != 0) {
+    printf("failed to start playback\n");
+    return -1;
+  }
+
   if (playback) {
-    if (jum_startPlayback(audio, filepath, -1) != 0) {
-      printf("failed to start playback\n");
-      return -1;
-    }
   } else {
     printf("Capture Devices\n");
     for (i = 0; i < audio->capture_device_count; ++i) {
@@ -81,7 +82,7 @@ int main(int argc, char* argv[]) {
     }
     printf("%d: %s \n", input, audio->capture_device_info[input].name);
 
-    if (jum_startCapture(audio, input) != 0) {
+    if (jum_openCaptureDevice(audio, input) != 0) {
       printf("failed to start capture\n");
       return -1;
     }
@@ -93,32 +94,6 @@ int main(int argc, char* argv[]) {
   float amplitude = 1;
   while (1) {
     start = SDL_GetTicks();
-    // printf("frame time: %dms\n", msec);
-    if (SDL_PollEvent(&event) && (event.type == SDL_KEYDOWN)) {
-      switch (event.key.keysym.sym) {
-        case SDLK_LEFT:
-          jum_pausePlayback(audio);
-          break;
-        case SDLK_RIGHT:
-          jum_resumePlayback(audio);
-          break;
-        case SDLK_UP:
-          amplitude += 0.1;
-          printf("amplitude: %f\n", amplitude);
-          jum_setAmplitude(audio, amplitude);
-          break;
-        case SDLK_DOWN:
-          amplitude -= 0.1;
-          printf("amplitude: %f\n", amplitude);
-          jum_setAmplitude(audio, amplitude);
-          break;
-        default:
-          done = true;
-          break;
-      }
-      if(done)
-        break;
-    }
 
     jum_analyze(fft, audio, delta);
     SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
@@ -129,7 +104,7 @@ int main(int argc, char* argv[]) {
                          WINDOW_HEIGHT - WINDOW_HEIGHT * (fft->result[i]));
     }
     SDL_RenderDrawLine(renderer, 0, 0, fft->level * NUM_BINS, 0);
-    SDL_RenderDrawLine(renderer, 0, WINDOW_HEIGHT - 1, jum_getCursor(audio) * NUM_BINS,
+    SDL_RenderDrawLine(renderer, 0, WINDOW_HEIGHT - 1, jum_getSongCursor(audio),
                        WINDOW_HEIGHT - 1);
     SDL_RenderPresent(renderer);
     delta = SDL_GetTicks() - start;
